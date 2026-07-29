@@ -1,0 +1,10 @@
+prefix=/usr/local
+libdir=${prefix}/lib/x86_64-linux-gnu
+includedir=${prefix}/include
+
+Name: igvm
+Description: The igvm crate is an implementation of a parser for the Independent Guest Virtual Machine (IGVM) file format.
+Version: 0.4.0
+Libs: ${libdir}/libigvm.a
+Libs.private: -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
+Cflags: -I${includedir}
