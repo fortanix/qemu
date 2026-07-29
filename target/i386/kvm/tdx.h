@@ -46,6 +46,20 @@ typedef struct TdxRamEntry {
     enum TdxRamType type;
 } TdxRamEntry;
 
+/*
+ * A region of guest memory populated from an IGVM file.  These are collected
+ * while the IGVM file is processed and are added to the TD when the VM is
+ * finalized: KVM_TDX_INIT_MEM_REGION is a vCPU ioctl and cannot be issued
+ * until the vCPUs have been TD-initialized, which happens later.
+ */
+typedef struct TdxIgvmRegion {
+    QTAILQ_ENTRY(TdxIgvmRegion) next;
+    hwaddr gpa;
+    void *hva;
+    uint64_t length;
+    bool measure;
+} TdxIgvmRegion;
+
 typedef struct TdxGuest {
     X86ConfidentialGuest parent_obj;
 
@@ -63,6 +77,9 @@ typedef struct TdxGuest {
 
     uint32_t nr_ram_entries;
     TdxRamEntry *ram_entries;
+
+    /* Memory regions to add to the TD, populated from an IGVM file */
+    QTAILQ_HEAD(, TdxIgvmRegion) igvm_regions;
 
     /* GetQuote */
     SocketAddress *qg_sock_addr;

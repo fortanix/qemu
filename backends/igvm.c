@@ -773,6 +773,7 @@ static int qigvm_supported_platform_compat_mask(QIgvm *ctx, Error **errp)
     uint32_t compatibility_mask_sev = 0;
     uint32_t compatibility_mask_sev_es = 0;
     uint32_t compatibility_mask_sev_snp = 0;
+    uint32_t compatibility_mask_tdx = 0;
     uint32_t compatibility_mask = 0;
 
     header_count = igvm_header_count(ctx->file, IGVM_HEADER_SECTION_PLATFORM);
@@ -830,6 +831,13 @@ static int qigvm_supported_platform_compat_mask(QIgvm *ctx, Error **errp)
                         platform->highest_vtl, platform->shared_gpa_boundary)) {
                     compatibility_mask_sev_snp = platform->compatibility_mask;
                 }
+            } else if ((platform->platform_type == IGVM_PLATFORM_TYPE_TDX) &&
+                       ctx->machine_state->cgs) {
+                if (ctx->cgsc->check_support(
+                        CGS_PLATFORM_TDX, platform->platform_version,
+                        platform->highest_vtl, platform->shared_gpa_boundary)) {
+                    compatibility_mask_tdx = platform->compatibility_mask;
+                }
             } else if (platform->platform_type == IGVM_PLATFORM_TYPE_NATIVE) {
                 compatibility_mask = platform->compatibility_mask;
             }
@@ -837,7 +845,10 @@ static int qigvm_supported_platform_compat_mask(QIgvm *ctx, Error **errp)
         }
     }
     /* Choose the strongest supported isolation technology */
-    if (compatibility_mask_sev_snp != 0) {
+    if (compatibility_mask_tdx != 0) {
+        ctx->compatibility_mask = compatibility_mask_tdx;
+        ctx->platform_type = IGVM_PLATFORM_TYPE_TDX;
+    } else if (compatibility_mask_sev_snp != 0) {
         ctx->compatibility_mask = compatibility_mask_sev_snp;
         ctx->platform_type = IGVM_PLATFORM_TYPE_SEV_SNP;
     } else if (compatibility_mask_sev_es != 0) {

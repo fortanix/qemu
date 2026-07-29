@@ -37,8 +37,30 @@ Supported Platforms
 -------------------
 
 Currently, IGVM files can be provided for Confidential Guests on host systems
-that support AMD SEV, SEV-ES and SEV-SNP with KVM. IGVM files can also be
-provided for non-confidential guests.
+that support AMD SEV, SEV-ES and SEV-SNP or Intel TDX with KVM. IGVM files can
+also be provided for non-confidential guests.
+
+
+Limitations when using IGVM with Intel TDX
+------------------------------------------
+
+A TD is configured from the IGVM file instead of from a TDVF image, so no
+firmware is supplied with ``-bios``. The pages described by the IGVM file are
+added to the TD and measured in place of the TDVF sections, and no TD HOB is
+built: the guest firmware contained in the IGVM file is expected to discover
+its memory layout through IGVM parameters, such as a memory map inserted with
+``IGVM_VHT_PARAMETER_INSERT``.
+
+The initial CPU state of a TD is defined by the TDX architecture and cannot be
+set by the loader, so an IGVM file for TDX must not contain a VP context
+directive. Guest code starts at the reset vector in 32-bit protected mode and
+is responsible for entering long mode itself. Secrets and CPUID page
+directives are SEV-SNP concepts and are rejected as well.
+
+Only the memory populated from the IGVM file is accepted while the TD is being
+built. The guest must accept the remainder before using it, so the firmware in
+the IGVM file is responsible for communicating the unaccepted ranges to the
+guest OS.
 
 
 Limitations when using IGVM with AMD SEV, SEV-ES and SEV-SNP

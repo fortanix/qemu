@@ -285,58 +285,84 @@ static void tdx_init_ram_entries(void)
     tdx_guest->nr_ram_entries = j;
 }
 
-static void tdx_post_init_vcpus(void)
+/*
+ * @hob_addr becomes the TD's initial RCX.  It is opaque to KVM and to the TDX
+ * module: for a TDVF guest it points at the TD HOB, while a guest configured
+ * from an IGVM file has no HOB and receives zero.
+ */
+static void tdx_post_init_vcpus(uint64_t hob_addr)
 {
-    TdxFirmwareEntry *hob;
     CPUState *cpu;
 
-    hob = tdx_get_hob_entry(tdx_guest);
     CPU_FOREACH(cpu) {
-        tdx_vcpu_ioctl(cpu, KVM_TDX_INIT_VCPU, 0, (void *)(uintptr_t)hob->address,
+        tdx_vcpu_ioctl(cpu, KVM_TDX_INIT_VCPU, 0, (void *)(uintptr_t)hob_addr,
                        &error_fatal);
     }
 }
 
-static void tdx_init_fw_mem_region(void)
+/* Add @length bytes at @hva to the TD at @gpa, optionally extending the MRTD */
+static void tdx_init_mem_region(hwaddr gpa, void *hva, uint64_t length,
+                                bool measure)
 {
-    TdxFirmware *tdvf = &tdx_guest->tdvf;
-    TdxFirmwareEntry *entry;
+    struct kvm_tdx_init_mem_region region;
     Error *local_err = NULL;
+    uint32_t flags;
     int r;
 
-    for_each_tdx_fw_entry(tdvf, entry) {
-        struct kvm_tdx_init_mem_region region;
-        uint32_t flags;
+    region = (struct kvm_tdx_init_mem_region) {
+        .source_addr = (uintptr_t)hva,
+        .gpa = gpa,
+        .nr_pages = length >> 12,
+    };
 
-        region = (struct kvm_tdx_init_mem_region) {
-            .source_addr = (uintptr_t)entry->mem_ptr,
-            .gpa = entry->address,
-            .nr_pages = entry->size >> 12,
-        };
+    flags = measure ? KVM_TDX_MEASURE_MEMORY_REGION : 0;
 
-        flags = entry->attributes & TDVF_SECTION_ATTRIBUTES_MR_EXTEND ?
-                KVM_TDX_MEASURE_MEMORY_REGION : 0;
-
-        do {
-            error_free(local_err);
-            local_err = NULL;
-            r = tdx_vcpu_ioctl(first_cpu, KVM_TDX_INIT_MEM_REGION, flags,
-                               &region, &local_err);
-        } while (r == -EAGAIN || r == -EINTR);
-        if (r < 0) {
-            error_report_err(local_err);
-            exit(1);
-        }
-
-        if (entry->type == TDVF_SECTION_TYPE_TD_HOB ||
-            entry->type == TDVF_SECTION_TYPE_TEMP_MEM) {
-            qemu_ram_munmap(-1, entry->mem_ptr, entry->size);
-            entry->mem_ptr = NULL;
-        }
+    do {
+        error_free(local_err);
+        local_err = NULL;
+        r = tdx_vcpu_ioctl(first_cpu, KVM_TDX_INIT_MEM_REGION, flags,
+                           &region, &local_err);
+    } while (r == -EAGAIN || r == -EINTR);
+    if (r < 0) {
+        error_report_err(local_err);
+        exit(1);
     }
 }
 
-static void tdx_finalize_vm(Notifier *notifier, void *unused)
+/*
+ * Populate the TD from the regions collected while processing an IGVM file.
+ * Unlike the TDVF case there is no firmware volume and no TD HOB: the guest
+ * firmware is one of the IGVM regions and learns its memory layout from IGVM
+ * parameters instead.
+ */
+static void tdx_finalize_vm_igvm(void)
+{
+    TdxIgvmRegion *region, *next_region;
+
+    tdx_post_init_vcpus(0);
+
+    /*
+     * Consume the queued regions: a guest reset reprocesses the IGVM file and
+     * queues them again, so anything left here would be added to the TD twice.
+     */
+    QTAILQ_FOREACH_SAFE(region, &tdx_guest->igvm_regions, next, next_region) {
+        /*
+         * KVM_TDX_INIT_MEM_REGION requires the GPA range to have the private
+         * memory attribute set in advance.
+         */
+        if (kvm_set_memory_attributes_private(region->gpa, region->length)) {
+            error_report("TDX: failed to configure initial private memory at "
+                         "GPA 0x%" HWADDR_PRIx, region->gpa);
+            exit(1);
+        }
+        tdx_init_mem_region(region->gpa, region->hva, region->length,
+                            region->measure);
+        QTAILQ_REMOVE(&tdx_guest->igvm_regions, region, next);
+        g_free(region);
+    }
+}
+
+static void tdx_finalize_vm_tdvf(void)
 {
     TdxFirmware *tdvf = &tdx_guest->tdvf;
     TdxFirmwareEntry *entry;
@@ -377,8 +403,19 @@ static void tdx_finalize_vm(Notifier *notifier, void *unused)
 
     tdvf_hob_create(tdx_guest, tdx_get_hob_entry(tdx_guest));
 
-    tdx_post_init_vcpus();
-    tdx_init_fw_mem_region();
+    tdx_post_init_vcpus(tdx_get_hob_entry(tdx_guest)->address);
+
+    for_each_tdx_fw_entry(tdvf, entry) {
+        tdx_init_mem_region(entry->address, entry->mem_ptr, entry->size,
+                            entry->attributes &
+                            TDVF_SECTION_ATTRIBUTES_MR_EXTEND);
+
+        if (entry->type == TDVF_SECTION_TYPE_TD_HOB ||
+            entry->type == TDVF_SECTION_TYPE_TEMP_MEM) {
+            qemu_ram_munmap(-1, entry->mem_ptr, entry->size);
+            entry->mem_ptr = NULL;
+        }
+    }
 
     /*
      * TDVF image has been copied into private region above via
@@ -386,6 +423,15 @@ static void tdx_finalize_vm(Notifier *notifier, void *unused)
      */
     ram_block = tdx_guest->tdvf_mr->ram_block;
     ram_block_discard_range(ram_block, 0, ram_block->max_length);
+}
+
+static void tdx_finalize_vm(Notifier *notifier, void *unused)
+{
+    if (X86_MACHINE(qdev_get_machine())->igvm) {
+        tdx_finalize_vm_igvm();
+    } else {
+        tdx_finalize_vm_tdvf();
+    }
 
     tdx_vm_ioctl(KVM_TDX_FINALIZE_VM, 0, NULL, &error_fatal);
     CONFIDENTIAL_GUEST_SUPPORT(tdx_guest)->ready = true;
@@ -1554,6 +1600,7 @@ static void tdx_guest_init(Object *obj)
     TdxGuest *tdx = TDX_GUEST(obj);
 
     qemu_mutex_init(&tdx->lock);
+    QTAILQ_INIT(&tdx->igvm_regions);
 
     cgs->require_guest_memfd = true;
     tdx->attributes = TDX_TD_ATTRIBUTES_SEPT_VE_DISABLE;
@@ -1593,12 +1640,100 @@ static ResettableState *tdx_reset_state(Object *obj)
     return &tdx->reset_state;
 }
 
+static bool tdx_cgs_check_support(ConfidentialGuestPlatformType platform,
+                                  uint16_t platform_version,
+                                  uint8_t highest_vtl,
+                                  uint64_t shared_gpa_boundary)
+{
+    return (platform == CGS_PLATFORM_TDX) && is_tdx_vm();
+}
+
+static int tdx_cgs_set_guest_state(hwaddr gpa, uint8_t *ptr, uint64_t len,
+                                   ConfidentialGuestPageType memory_type,
+                                   uint16_t cpu_index, Error **errp)
+{
+    TdxGuest *tdx = TDX_GUEST(MACHINE(qdev_get_machine())->cgs);
+    TdxIgvmRegion *region;
+
+    switch (memory_type) {
+    case CGS_PAGE_TYPE_NORMAL:
+    case CGS_PAGE_TYPE_ZERO:
+    case CGS_PAGE_TYPE_UNMEASURED:
+        break;
+
+    case CGS_PAGE_TYPE_REQUIRED_MEMORY:
+        if (kvm_convert_memory(gpa, len, true) < 0) {
+            error_setg(errp,
+                       "%s: failed to configure required memory at GPA 0x%"
+                       HWADDR_PRIx, __func__, gpa);
+            return -1;
+        }
+        return 0;
+
+    default:
+        /*
+         * A TD has no VMSA: its initial vCPU state is architecturally defined
+         * and cannot be configured by the loader.  Secrets and CPUID pages are
+         * SEV-SNP concepts with no TDX equivalent.
+         */
+        error_setg(errp, "%s: page type %d is not supported for TDX",
+                   __func__, memory_type);
+        return -1;
+    }
+
+    /* Deferred until tdx_finalize_vm(); see TdxIgvmRegion */
+    region = g_new0(TdxIgvmRegion, 1);
+    region->gpa = gpa;
+    region->hva = ptr;
+    region->length = len;
+    region->measure = (memory_type != CGS_PAGE_TYPE_UNMEASURED);
+    QTAILQ_INSERT_TAIL(&tdx->igvm_regions, region, next);
+
+    return 0;
+}
+
+static int tdx_cgs_get_mem_map_entry(int index,
+                                     ConfidentialGuestMemoryMapEntry *entry,
+                                     Error **errp)
+{
+    struct e820_entry *table;
+    int num_entries;
+
+    num_entries = e820_get_table(&table);
+    if ((index < 0) || (index >= num_entries)) {
+        return 1;
+    }
+    entry->gpa = table[index].address;
+    entry->size = table[index].length;
+    switch (table[index].type) {
+    case E820_RAM:
+        entry->type = CGS_MEM_RAM;
+        break;
+    case E820_RESERVED:
+        entry->type = CGS_MEM_RESERVED;
+        break;
+    case E820_ACPI:
+        entry->type = CGS_MEM_ACPI;
+        break;
+    case E820_NVS:
+        entry->type = CGS_MEM_NVS;
+        break;
+    case E820_UNUSABLE:
+        entry->type = CGS_MEM_UNUSABLE;
+        break;
+    }
+    return 0;
+}
+
 static void tdx_guest_class_init(ObjectClass *oc, const void *data)
 {
     ConfidentialGuestSupportClass *klass = CONFIDENTIAL_GUEST_SUPPORT_CLASS(oc);
     X86ConfidentialGuestClass *x86_klass = X86_CONFIDENTIAL_GUEST_CLASS(oc);
     ResettableClass *rc = RESETTABLE_CLASS(oc);
 
+    klass->check_support = tdx_cgs_check_support;
+    klass->set_guest_state = tdx_cgs_set_guest_state;
+    klass->get_mem_map_entry = tdx_cgs_get_mem_map_entry;
     klass->kvm_init = tdx_kvm_init;
     klass->can_rebuild_guest_state = true;
     x86_klass->kvm_type = tdx_kvm_type;
