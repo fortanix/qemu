@@ -148,6 +148,7 @@ static void pc_q35_init(MachineState *machine)
     bool acpi_pcihp;
     bool keep_pci_slot_hpc;
     uint64_t pci_hole64_size = 0;
+    int fdt_size;
 
     assert(pcmc->pci_enabled);
 
@@ -328,6 +329,13 @@ static void pc_q35_init(MachineState *machine)
                                x86_nvdimm_acpi_dsmio,
                                x86ms->fw_cfg, OBJECT(pcms));
     }
+
+    /*
+     * Describe the machine in a device tree, for firmware that would rather
+     * not parse ACPI and for the IGVM device tree parameter.  All the devices
+     * it describes exist by now.
+     */
+    x86_fdt_setup(x86ms, "qemu,pc-q35", &fdt_size);
 }
 
 #define DEFINE_Q35_MACHINE(major, minor) \

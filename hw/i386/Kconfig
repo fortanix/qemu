@@ -39,6 +39,8 @@ config PC
     imply VIRTIO_VGA
     imply NVDIMM
     imply FDC_ISA
+    # Only implied: DEVICE_TREE depends on libfdt, which PC does not require
+    imply DEVICE_TREE
     select I8259
     select I8254
     select PCKBD

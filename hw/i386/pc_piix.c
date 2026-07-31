@@ -118,6 +118,7 @@ static void pc_init1(MachineState *machine, const char *pci_type)
     PCIDevice *pci_dev;
     DeviceState *dev;
     size_t i;
+    int fdt_size;
 
     assert(pcmc->pci_enabled);
 
@@ -320,6 +321,13 @@ static void pc_init1(MachineState *machine, const char *pci_type)
                                x86_nvdimm_acpi_dsmio,
                                x86ms->fw_cfg, OBJECT(pcms));
     }
+
+    /*
+     * Describe the machine in a device tree, for firmware that would rather
+     * not parse ACPI and for the IGVM device tree parameter.  All the devices
+     * it describes exist by now.
+     */
+    x86_fdt_setup(x86ms, "qemu,pc-i440fx", &fdt_size);
 }
 
 typedef enum PCSouthBridgeOption {
