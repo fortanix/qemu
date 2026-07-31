@@ -57,7 +57,7 @@ static void dt_add_microvm_irq(MicrovmMachineState *mms,
     }
 
     qemu_fdt_setprop_cell(ms->fdt, nodename, "interrupt-parent",
-                          mms->ioapic_phandle[index]);
+                          X86_MACHINE(mms)->ioapic_phandle[index]);
     qemu_fdt_setprop_cells(ms->fdt, nodename, "interrupts", irq, 0);
 }
 
@@ -152,44 +152,6 @@ static void dt_add_pcie(MicrovmMachineState *mms)
     g_free(nodename);
 }
 
-static void dt_add_ioapic(MicrovmMachineState *mms, SysBusDevice *dev)
-{
-    MachineState *ms = MACHINE(mms);
-    hwaddr base = dev->mmio[0].addr;
-    char *nodename;
-    uint32_t ph;
-    int index;
-
-    switch (base) {
-    case IO_APIC_DEFAULT_ADDRESS:
-        index = 0;
-        break;
-    case IO_APIC_SECONDARY_ADDRESS:
-        index = 1;
-        break;
-    default:
-        fprintf(stderr, "unknown ioapic @ %" PRIx64 "\n", base);
-        return;
-    }
-
-    nodename = g_strdup_printf("/ioapic%d@%" PRIx64, index + 1, base);
-    qemu_fdt_add_subnode(ms->fdt, nodename);
-    qemu_fdt_setprop_string(ms->fdt, nodename,
-                            "compatible", "intel,ce4100-ioapic");
-    qemu_fdt_setprop(ms->fdt, nodename, "interrupt-controller", NULL, 0);
-    qemu_fdt_setprop_cell(ms->fdt, nodename, "#interrupt-cells", 0x2);
-    qemu_fdt_setprop_cell(ms->fdt, nodename, "#address-cells", 0x2);
-    qemu_fdt_setprop_sized_cells(ms->fdt, nodename, "reg",
-                                 2, base, 2, 0x1000);
-
-    ph = qemu_fdt_alloc_phandle(ms->fdt);
-    qemu_fdt_setprop_cell(ms->fdt, nodename, "phandle", ph);
-    qemu_fdt_setprop_cell(ms->fdt, nodename, "linux,phandle", ph);
-    mms->ioapic_phandle[index] = ph;
-
-    g_free(nodename);
-}
-
 static void dt_add_isa_serial(MicrovmMachineState *mms, ISADevice *dev)
 {
     const char compat[] = "ns16550";
@@ -265,19 +227,8 @@ static void dt_setup_sys_bus(MicrovmMachineState *mms)
     BusChild *kid;
     Object *obj;
 
-    /* sysbus devices */
+    /* sysbus devices; the I/O APICs are already described by x86_fdt_setup() */
     bus = sysbus_get_default();
-    QTAILQ_FOREACH(kid, &bus->children, sibling) {
-        DeviceState *dev = kid->child;
-
-        /* ioapic */
-        obj = object_dynamic_cast(OBJECT(dev), TYPE_IOAPIC);
-        if (obj) {
-            dt_add_ioapic(mms, SYS_BUS_DEVICE(obj));
-            continue;
-        }
-    }
-
     QTAILQ_FOREACH(kid, &bus->children, sibling) {
         DeviceState *dev = kid->child;
 
@@ -325,16 +276,9 @@ void dt_setup_microvm(MicrovmMachineState *mms)
 {
     X86MachineState *x86ms = X86_MACHINE(mms);
     MachineState *ms = MACHINE(mms);
-    int size = 0;
+    int size;
 
-    ms->fdt = create_device_tree(&size);
-
-    /* root node */
-    qemu_fdt_setprop_string(ms->fdt, "/", "compatible", "linux,microvm");
-    qemu_fdt_setprop_cell(ms->fdt, "/", "#address-cells", 0x2);
-    qemu_fdt_setprop_cell(ms->fdt, "/", "#size-cells", 0x2);
-
-    qemu_fdt_add_subnode(ms->fdt, "/chosen");
+    x86_fdt_setup(x86ms, "linux,microvm", &size);
     dt_setup_sys_bus(mms);
 
     /* add to fw_cfg */

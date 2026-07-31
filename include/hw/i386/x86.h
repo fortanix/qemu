@@ -70,6 +70,9 @@ struct X86MachineState {
     unsigned pci_irq_mask;
     unsigned apic_id_limit;
     uint16_t boot_cpus;
+
+    /* Device tree phandles of the I/O APICs, for "interrupt-parent" */
+    uint32_t ioapic_phandle[2];
     SgxEPCList *sgx_epc_list;
 
     OnOffAuto smm;
@@ -112,6 +115,14 @@ uint32_t x86_cpu_apic_id_from_index(X86MachineState *x86ms,
 
 void x86_cpus_init(X86MachineState *pcms, int default_cpu_version);
 void x86_rtc_set_cpus_count(ISADevice *rtc, uint16_t cpus_count);
+
+/*
+ * Build MachineState::fdt describing the interrupt controllers, with
+ * @compatible as the root node's "compatible", and return the size of the
+ * buffer holding it in @sizep.  Machines may add their own nodes afterwards.
+ * Leaves the tree NULL in builds without device tree support.
+ */
+void x86_fdt_setup(X86MachineState *x86ms, const char *compatible, int *sizep);
 void x86_cpu_pre_plug(HotplugHandler *hotplug_dev,
                       DeviceState *dev, Error **errp);
 void x86_cpu_plug(HotplugHandler *hotplug_dev,
