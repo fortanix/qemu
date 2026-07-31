@@ -2,9 +2,15 @@
  * Device tree generation for x86 machines
  *
  * This builds the part of the tree that every x86 machine can describe: the
- * interrupt controllers.  Machines with more to say add their own nodes on
- * top of it -- see microvm-dt.c for the virtio-mmio transports, the PCIe ECAM
- * and the ISA devices microvm exposes.
+ * CPUs and the interrupt controllers.  Machines with more to say add their own
+ * nodes on top of it -- see microvm-dt.c for the virtio-mmio transports, the
+ * PCIe ECAM and the ISA devices microvm exposes.
+ *
+ * The consumers are firmware that would rather not parse ACPI (edk2, Coconut
+ * SVSM) and, when the tree is handed over as an IGVM device tree parameter, a
+ * Linux guest booting without ACPI tables: arch/x86/kernel/devicetree.c turns
+ * /cpus into registered local APICs, which is the only way such a guest ever
+ * learns that it has more than one CPU.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -27,6 +33,57 @@
 #include "hw/core/sysbus.h"
 #include "system/device_tree.h"
 #include "target/i386/cpu.h"
+
+/*
+ * One node per CPU that exists, keyed by APIC ID.  #address-cells is not
+ * decoration: a consumer reads the APIC ID out of "reg" using the cell count
+ * declared here, and Linux's of_get_cpu_hwid() gives up without it.
+ */
+static void x86_fdt_add_cpus(X86MachineState *x86ms)
+{
+    MachineState *ms = MACHINE(x86ms);
+    const CPUArchIdList *possible_cpus = ms->possible_cpus;
+    int i;
+
+    qemu_fdt_add_subnode(ms->fdt, "/cpus");
+    qemu_fdt_setprop_cell(ms->fdt, "/cpus", "#address-cells", 1);
+    qemu_fdt_setprop_cell(ms->fdt, "/cpus", "#size-cells", 0);
+
+    for (i = 0; i < possible_cpus->len; i++) {
+        uint64_t apic_id = possible_cpus->cpus[i].arch_id;
+        char *nodename;
+
+        /* Hotpluggable slots that are still empty have nothing to describe */
+        if (!possible_cpus->cpus[i].cpu) {
+            continue;
+        }
+
+        nodename = g_strdup_printf("/cpus/cpu@%" PRIx64, apic_id);
+        qemu_fdt_add_subnode(ms->fdt, nodename);
+        qemu_fdt_setprop_string(ms->fdt, nodename, "device_type", "cpu");
+        qemu_fdt_setprop_cell(ms->fdt, nodename, "reg", apic_id);
+        g_free(nodename);
+    }
+}
+
+static void x86_fdt_add_lapic(X86MachineState *x86ms)
+{
+    MachineState *ms = MACHINE(x86ms);
+    char *nodename = g_strdup_printf("/lapic@%x", APIC_DEFAULT_ADDRESS);
+
+    qemu_fdt_add_subnode(ms->fdt, nodename);
+    qemu_fdt_setprop_string(ms->fdt, nodename,
+                            "compatible", "intel,ce4100-lapic");
+    qemu_fdt_setprop_sized_cells(ms->fdt, nodename, "reg",
+                                 2, APIC_DEFAULT_ADDRESS, 2, 0x1000);
+    /*
+     * There is no i8259 to hand over from, so the local APIC is wired up
+     * directly rather than through an IMCR.
+     */
+    qemu_fdt_setprop(ms->fdt, nodename, "intel,virtual-wire-mode", NULL, 0);
+
+    g_free(nodename);
+}
 
 static void x86_fdt_add_ioapic(X86MachineState *x86ms, SysBusDevice *dev)
 {
@@ -76,7 +133,13 @@ static void x86_fdt_add_ioapics(X86MachineState *x86ms)
     BusChild *kid;
 
     QTAILQ_FOREACH(kid, &bus->children, sibling) {
-        Object *obj = object_dynamic_cast(OBJECT(kid->child), TYPE_IOAPIC);
+        Object *dev = OBJECT(kid->child);
+        /*
+         * The guest sees an I/O APIC whether QEMU or KVM emulates it, but the
+         * two are distinct QOM types.
+         */
+        Object *obj = object_dynamic_cast(dev, TYPE_IOAPIC) ?:
+                      object_dynamic_cast(dev, TYPE_KVM_IOAPIC);
 
         if (obj) {
             x86_fdt_add_ioapic(x86ms, SYS_BUS_DEVICE(obj));
@@ -101,5 +164,7 @@ void x86_fdt_setup(X86MachineState *x86ms, const char *compatible, int *sizep)
 
     qemu_fdt_add_subnode(ms->fdt, "/chosen");
 
+    x86_fdt_add_cpus(x86ms);
+    x86_fdt_add_lapic(x86ms);
     x86_fdt_add_ioapics(x86ms);
 }

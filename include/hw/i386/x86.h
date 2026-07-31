@@ -117,7 +117,7 @@ void x86_cpus_init(X86MachineState *pcms, int default_cpu_version);
 void x86_rtc_set_cpus_count(ISADevice *rtc, uint16_t cpus_count);
 
 /*
- * Build MachineState::fdt describing the interrupt controllers, with
+ * Build MachineState::fdt describing the CPUs and interrupt controllers, with
  * @compatible as the root node's "compatible", and return the size of the
  * buffer holding it in @sizep.  Machines may add their own nodes afterwards.
  * Leaves the tree NULL in builds without device tree support.
