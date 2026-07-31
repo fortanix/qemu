@@ -3359,81 +3359,91 @@ int kvm_convert_memory(hwaddr start, hwaddr size, bool to_private)
         return ret;
     }
 
-    section = memory_region_find(get_system_memory(), start, size);
-    mr = section.mr;
-    if (!mr) {
-        /*
-         * Ignore converting non-assigned region to shared.
-         *
-         * TDX requires vMMIO region to be shared to inject #VE to guest.
-         * OVMF issues conservatively MapGPA(shared) on 32bit PCI MMIO region,
-         * and vIO-APIC 0xFEC00000 4K page.
-         * OVMF assigns 32bit PCI MMIO region to
-         * [top of low memory: typically 2GB=0xC000000,  0xFC00000)
-         */
-        if (!to_private) {
-            return 0;
-        }
-        return ret;
-    }
-
-    if (!memory_region_has_guest_memfd(mr)) {
-        /*
-         * Because vMMIO region must be shared, guest TD may convert vMMIO
-         * region to shared explicitly.  Don't complain such case.  See
-         * memory_region_type() for checking if the region is MMIO region.
-         */
-        if (!to_private &&
-            !memory_region_is_ram(mr) &&
-            !memory_region_is_ram_device(mr) &&
-            !memory_region_is_rom(mr) &&
-            !memory_region_is_romd(mr)) {
-            ret = 0;
-        } else {
-            error_report("Convert non guest_memfd backed memory region "
-                        "(0x%"HWADDR_PRIx" ,+ 0x%"HWADDR_PRIx") to %s",
-                        start, size, to_private ? "private" : "shared");
-        }
-        goto out_unref;
-    }
-
+    /*
+     * Set KVM memory attributes for the entire range upfront.
+     * KVM handles this at the memslot level and doesn't have the
+     * memory region boundary issue that ram_block_attributes has.
+     */
     if (to_private) {
         ret = kvm_set_memory_attributes_private(start, size);
     } else {
         ret = kvm_set_memory_attributes_shared(start, size);
     }
     if (ret) {
-        goto out_unref;
+        return ret;
     }
 
-    addr = memory_region_get_ram_ptr(mr) + section.offset_within_region;
-    rb = qemu_ram_block_from_host(addr, false, &offset);
+    /*
+     * Process ram_block_attributes and discard/populate one memory region
+     * section at a time, since a single guest PSC request may span multiple
+     * memory regions (e.g. q35 splits RAM at the 0xC0000 legacy boundary).
+     */
+    while (size > 0) {
+        hwaddr chunk;
 
-    ret = ram_block_attributes_state_change(rb->attributes,
-                                            offset, size, to_private);
-    if (ret) {
-        error_report("Failed to notify the listener the state change of "
-                     "(0x%"HWADDR_PRIx" + 0x%"HWADDR_PRIx") to %s",
-                     start, size, to_private ? "private" : "shared");
-        goto out_unref;
-    }
-
-    if (to_private) {
-        if (rb->page_size != qemu_real_host_page_size()) {
-            /*
-             * shared memory is backed by hugetlb, which is supposed to be
-             * pre-allocated and doesn't need to be discarded
-             */
-            goto out_unref;
+        section = memory_region_find(get_system_memory(), start, size);
+        mr = section.mr;
+        if (!mr) {
+            if (!to_private) {
+                return 0;
+            }
+            return -EINVAL;
         }
-        ret = ram_block_discard_range(rb, offset, size);
-    } else {
-        ret = ram_block_discard_guest_memfd_range(rb, offset, size);
+
+        chunk = int128_get64(section.size);
+
+        if (!memory_region_has_guest_memfd(mr)) {
+            if (!to_private &&
+                !memory_region_is_ram(mr) &&
+                !memory_region_is_ram_device(mr) &&
+                !memory_region_is_rom(mr) &&
+                !memory_region_is_romd(mr)) {
+                ret = 0;
+            } else {
+                error_report("Convert non guest_memfd backed memory region "
+                            "(0x%"HWADDR_PRIx" ,+ 0x%"HWADDR_PRIx") to %s",
+                            start, chunk, to_private ? "private" : "shared");
+                ret = -EINVAL;
+            }
+            memory_region_unref(mr);
+            if (ret) {
+                return ret;
+            }
+            goto next;
+        }
+
+        addr = memory_region_get_ram_ptr(mr) + section.offset_within_region;
+        rb = qemu_ram_block_from_host(addr, false, &offset);
+
+        ret = ram_block_attributes_state_change(rb->attributes,
+                                                offset, chunk, to_private);
+        if (ret) {
+            error_report("Failed to notify the listener the state change of "
+                         "(0x%"HWADDR_PRIx" + 0x%"HWADDR_PRIx") to %s",
+                         start, chunk, to_private ? "private" : "shared");
+            memory_region_unref(mr);
+            return ret;
+        }
+
+        if (to_private) {
+            if (rb->page_size == qemu_real_host_page_size()) {
+                ret = ram_block_discard_range(rb, offset, chunk);
+            }
+        } else {
+            ret = ram_block_discard_guest_memfd_range(rb, offset, chunk);
+        }
+
+        memory_region_unref(mr);
+        if (ret) {
+            return ret;
+        }
+
+next:
+        start += chunk;
+        size -= chunk;
     }
 
-out_unref:
-    memory_region_unref(mr);
-    return ret;
+    return 0;
 }
 
 int kvm_cpu_exec(CPUState *cpu)
