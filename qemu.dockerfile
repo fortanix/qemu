@@ -53,7 +53,7 @@ RUN cp igvm/igvm_c/include/*.h /usr/local/include/
 
 RUN git clone https://github.com/fortanix/qemu.git --depth 1 --branch cvm-fixes
 
-ENV PKG_CONFIG_PATH /usr/lib64/pkgconfig
+ENV PKG_CONFIG_PATH=/usr/lib64/pkgconfig
 
 WORKDIR qemu
 RUN mkdir build && cd build && ../configure \
@@ -85,7 +85,7 @@ RUN cd build && make -j$(nproc)
 RUN cd build && make install
 
 FROM ubuntu:24.04
-ENV LD_LIBRARY_PATH /usr/lib64
+ENV LD_LIBRARY_PATH=/usr/lib64
 RUN mkdir -p /var/local/run
 
 RUN apt update && apt upgrade -y && apt-get install -y \
